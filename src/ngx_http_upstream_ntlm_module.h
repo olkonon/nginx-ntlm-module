@@ -1,5 +1,8 @@
 
-
+/* location/server/main conf for ntlm_mode */
+typedef struct {
+    ngx_uint_t mode; /* ngx_ntlm_mode_e */
+} ngx_http_upstream_ntlm_loc_conf_t;
 
 
 /* ---------- режимы ntlm_mode ---------- */

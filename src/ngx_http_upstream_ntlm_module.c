@@ -24,21 +24,11 @@ static void ngx_http_upstream_ntlm_save_session(ngx_peer_connection_t *pc,
 #endif
 
 static void *ngx_http_upstream_ntlm_create_conf(ngx_conf_t *cf);
-static char *ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd,
-                                    void *conf);
-
-/* location/server/main conf for ntlm_mode */
-typedef struct {
-    ngx_uint_t mode; /* ngx_ntlm_mode_e */
-} ngx_http_upstream_ntlm_loc_conf_t;
-
+static char *ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void *ngx_http_upstream_ntlm_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_upstream_ntlm_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static char *ngx_http_upstream_ntlm_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-
 static void ngx_http_upstream_client_conn_cleanup(void *data);
-
-
 
 /* ---------- директивы ---------- */
 
@@ -206,8 +196,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_uint_t i;
     ngx_http_upstream_ntlm_cache_t *cached;
     ngx_http_upstream_ntlm_srv_conf_t *hncf;
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "ntlm init");
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ntlm init start");
 
     hncf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_ntlm_module);
 
@@ -258,6 +247,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
         cached[i].queued_in_cache = 0;
     }
 
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ntlm init success");
     return NGX_OK;
 }
 
@@ -369,7 +359,12 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     /* search cache for suitable connection */
+    if (!hndp->conf->cache_mutex) {
+        return NGX_ERROR;
+    }
     ngx_shmtx_lock(hndp->conf->cache_mutex);
+
+
     cache = &hndp->conf->cache;
 
     for (q = ngx_queue_head(cache); q != ngx_queue_sentinel(cache);
