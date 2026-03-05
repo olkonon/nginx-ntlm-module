@@ -1,0 +1,18 @@
+name: Build
+on: [push]
+jobs:
+  build:
+    strategy:
+      matrix:
+        nginx_version: [ 1.27.5, 1.28.1, 1.28.2, 1.29.4, 1.29.5 ]
+        script_name: [ '','-debug']
+    runs-on: ubuntu-latest
+    name: "Test build nginx${{matrix.script_name}} ${{ matrix.nginx_version }}"
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install environment
+        run: 'sudo apt install -y libpcre2-dev zlib1g-dev wget'
+      - name: Build nginx${{matrix.script_name}} ${{ matrix.nginx_version }}
+        env:
+            NGINX_VERSION: "${{ matrix.nginx_version }}"
+        run: './build${{matrix.script_name}}.sh'
