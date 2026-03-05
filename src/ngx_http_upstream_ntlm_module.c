@@ -206,7 +206,6 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_uint_t i;
     ngx_http_upstream_ntlm_cache_t *cached;
     ngx_http_upstream_ntlm_srv_conf_t *hncf;
-    ngx_str_t  shm_name = ngx_string("ntlm_cache");
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "ntlm init");
 
@@ -232,19 +231,25 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_queue_init(&hncf->free);
 
 
+    /*----- Create SHM mutext -----*/
+    ngx_shm_t shm;
+    shm.size = sizeof(ngx_shmtx_sh_t);
+    ngx_str_set(&shm.name, "ntlm_cache_mutex_zone");
+    shm.log = ngx_cycle->log;
 
-    hncf->shm_zone = ngx_shared_memory_add(cf, &shm_name, ngx_pagesize, &ngx_http_upstream_ntlm_module);
-    if (hncf->shm_zone == NULL) {
-        return NGX_ERROR;
+    if (ngx_shm_alloc(&shm) != NGX_OK) {
+         return NGX_ERROR;
     }
 
-    hncf->shm_zone->noreuse = 1;
+    ngx_shmtx_sh_t *shmtx_addr = (ngx_shmtx_sh_t *) shm.addr;
 
-    if (ngx_shmtx_create(&hncf->cache_mutex,
-                     (ngx_shmtx_sh_t *) &hncf->shm_zone->shm,
-                     (u_char *) "ntlm_cache_mutex") != NGX_OK) {
+    hncf->cache_mutex = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_shmtx_t));
+    hncf->cache_mutex->spin = 2048;  // для обычного mutex (не ngx_accept_mutex)
+    if (ngx_shmtx_create(hncf->cache_mutex, shmtx_addr, (u_char*) "ntlm_cache_mutex") != NGX_OK) {
+        ngx_shm_free(&shm);
         return NGX_ERROR;
     }
+    /*----- End SHM mutex create -----*/
 
     for (i = 0; i < hncf->max_cached; i++) {
         ngx_queue_insert_head(&hncf->free, &cached[i].queue);
@@ -364,7 +369,7 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     /* search cache for suitable connection */
-    ngx_shmtx_lock(&hndp->conf->cache_mutex);
+    ngx_shmtx_lock(hndp->conf->cache_mutex);
     cache = &hndp->conf->cache;
 
     for (q = ngx_queue_head(cache); q != ngx_queue_sentinel(cache);
@@ -444,11 +449,11 @@ found:
     pc->connection = c;
     pc->cached     = 1;
 
-    ngx_shmtx_unlock(&hndp->conf->cache_mutex);
+    ngx_shmtx_unlock(hndp->conf->cache_mutex);
     return NGX_DONE;
 
 returnOK:
-    ngx_shmtx_unlock(&hndp->conf->cache_mutex);
+    ngx_shmtx_unlock(hndp->conf->cache_mutex);
     return NGX_OK;
 }
 
@@ -511,7 +516,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
         if (n == -1 && ngx_socket_errno != NGX_EAGAIN) { goto invalid; }
     }
 
-    ngx_shmtx_lock(&hndp->conf->cache_mutex);
+    ngx_shmtx_lock(hndp->conf->cache_mutex);
     if (ngx_queue_empty(&hndp->conf->free)) {
         q = ngx_queue_last(&hndp->conf->cache);
         ngx_queue_remove(q);
@@ -536,7 +541,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     item->client_connection = hndp->client_connection;
     item->client_closed     = 0; /* A3 */
 
-    ngx_shmtx_unlock(&hndp->conf->cache_mutex);
+    ngx_shmtx_unlock(hndp->conf->cache_mutex);
 
     ngx_log_debug2(
         NGX_LOG_DEBUG_HTTP, pc->log, 0,
