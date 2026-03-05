@@ -4,11 +4,11 @@ if test -n "$ngx_module_link"; then
     # Этот блок используется, когда ты собираешь через --add-dynamic-module=...
     ngx_module_type=HTTP
     ngx_module_name=ngx_http_upstream_ntlm_module
-    ngx_module_srcs="$ngx_addon_dir/ngx_http_upstream_ntlm_module.c"
+    ngx_module_srcs="$ngx_addon_dir/src/ngx_http_upstream_ntlm_module.c"
     ngx_module_deps=""
     . auto/module
 else
     # Этот блок используется при старом add-on пути (статическая встройка)
     HTTP_MODULES="$HTTP_MODULES ngx_http_upstream_ntlm_module"
-    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_upstream_ntlm_module.c"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/src/ngx_http_upstream_ntlm_module.c"
 fi
