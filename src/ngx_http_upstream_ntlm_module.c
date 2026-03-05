@@ -196,7 +196,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_uint_t i;
     ngx_http_upstream_ntlm_cache_t *cached;
     ngx_http_upstream_ntlm_srv_conf_t *hncf;
-    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ntlm init start");
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] ntlm init start");
 
     hncf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_ntlm_module);
 
@@ -204,6 +204,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_conf_init_msec_value(hncf->timeout, 60000);
 
     if (hncf->original_init_upstream(cf, us) != NGX_OK) {
+
         return NGX_ERROR;
     }
 
@@ -219,26 +220,6 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_queue_init(&hncf->cache);
     ngx_queue_init(&hncf->free);
 
-
-    /*----- Create SHM mutext -----*/
-    ngx_shm_t shm;
-    shm.size = sizeof(ngx_shmtx_sh_t);
-    ngx_str_set(&shm.name, "ntlm_cache_mutex_zone");
-    shm.log = ngx_cycle->log;
-
-    if (ngx_shm_alloc(&shm) != NGX_OK) {
-         return NGX_ERROR;
-    }
-
-    ngx_shmtx_sh_t *shmtx_addr = (ngx_shmtx_sh_t *) shm.addr;
-
-    hncf->cache_mutex = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_shmtx_t));
-    hncf->cache_mutex->spin = 2048;  // для обычного mutex (не ngx_accept_mutex)
-    if (ngx_shmtx_create(hncf->cache_mutex, shmtx_addr, (u_char*) "ntlm_cache_mutex") != NGX_OK) {
-        ngx_shm_free(&shm);
-        return NGX_ERROR;
-    }
-    /*----- End SHM mutex create -----*/
 
     for (i = 0; i < hncf->max_cached; i++) {
         ngx_queue_insert_head(&hncf->free, &cached[i].queue);
@@ -745,6 +726,7 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_upstream_srv_conf_t *uscf;
     ngx_http_upstream_ntlm_srv_conf_t *hncf = conf;
+    ngx_shm_t shm;
 
     ngx_int_t n;
     ngx_str_t *value;
@@ -769,6 +751,27 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                                        : ngx_http_upstream_init_round_robin;
 
     uscf->peer.init_upstream = ngx_http_upstream_init_ntlm;
+
+    /*----- Create SHM mutext -----*/
+    shm.size = sizeof(ngx_shmtx_sh_t);
+    ngx_str_set(&shm.name, "ntlm_cache_mutex_zone");
+    shm.log = cf->log;
+
+    if (ngx_shm_alloc(&shm) != NGX_OK) {
+         ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] SHM init error");
+         return NGX_CONF_ERROR;
+    }
+
+    ngx_shmtx_sh_t *shmtx_addr = (ngx_shmtx_sh_t *) shm.addr;
+
+    hncf->cache_mutex = ngx_pcalloc(ngx_cycle->pool, sizeof(ngx_shmtx_t));
+    hncf->cache_mutex->spin = 2048;  // для обычного mutex (не ngx_accept_mutex)
+    if (ngx_shmtx_create(hncf->cache_mutex, shmtx_addr, (u_char*) "ntlm_cache_mutex") != NGX_OK) {
+        ngx_shm_free(&shm);
+        return  NGX_CONF_ERROR;
+    }
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] cache_mutex create success");
+    /*----- End SHM mutex create -----*/
 
     return NGX_CONF_OK;
 }
