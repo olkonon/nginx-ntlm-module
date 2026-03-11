@@ -590,15 +590,26 @@ static void
 ngx_http_upstream_client_conn_cleanup(void *data)
 {
     ngx_http_upstream_ntlm_cache_t *item = data;
+    ngx_connection_t               *pc;
+
+    pc = item->peer_connection;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                    "ntlm client closed %p, posting close for upstream %p",
-                   item->client_connection, item->peer_connection);
+                   item->client_connection, pc);
 
-    if (item->peer_connection != NULL) {
-        item->client_closed = 1;                     /* A1/A3 mark */
-        item->peer_connection->read->timedout = 1;   /* force close-handler path */
-        ngx_post_event(item->peer_connection->read, &ngx_posted_events);
+    if (pc != NULL
+        && pc->fd != (ngx_socket_t) -1
+        && !pc->close)
+    {
+        item->client_closed = 1; /* A1/A3 mark */
+        pc->read->timedout = 1;  /* force close-handler path */
+        ngx_post_event(pc->read, &ngx_posted_events);
+    } else {
+        /* соединение уже мертво/закрыто – отвязываем,
+         * чтобы не было висячей ссылки в кеше
+         */
+        item->peer_connection = NULL;
     }
 }
 
@@ -611,20 +622,20 @@ ngx_http_upstream_ntlm_dummy_handler(ngx_event_t *ev)
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, ev->log, 0, "ntlm dummy handler");
 }
 
-//++{
+//+++
 static void
 ngx_http_upstream_ntlm_close_handler(ngx_event_t *ev)
 {
-    ngx_http_upstream_ntlm_srv_conf_t  *conf;
-    ngx_http_upstream_ntlm_cache_t     *item;
-    ngx_connection_t                   *c;
-    int                                  n;
-    char                                 buf[1];
+    ngx_http_upstream_ntlm_srv_conf_t *conf;
+    ngx_http_upstream_ntlm_cache_t    *item;
+    ngx_connection_t                  *c;
+    int                                n;
+    char                               buf[1];
 
     c = ev->data;
 
     /* идемпотентный гард */
-    if (c->fd == (ngx_socket_t) -1 || c->close) {
+    if (c == NULL || c->fd == (ngx_socket_t) -1 || c->close) {
         return;
     }
 
@@ -650,6 +661,12 @@ close:
                    c, c->read->timedout);
 
     item = c->data;
+    if (item == NULL) {
+        /* соединение уже не привязано к кешу */
+        ngx_http_upstream_ntlm_close(c);
+        return;
+    }
+
     conf = item->conf;
 
     /* не позволяем cleanup постить повторно */
@@ -662,11 +679,15 @@ close:
         ngx_queue_insert_head(&conf->free, &item->queue);
     }
 
+    /* разрываем связь c->data -> item, чтобы поздние события
+     * не лезли в уже перераспределённый item.
+     */
+    c->data = NULL;
+
     ngx_http_upstream_ntlm_close(c);
 
     item->client_closed = 0;
 }
-
 //+++
 static void
 ngx_http_upstream_ntlm_close(ngx_connection_t *c)
@@ -683,13 +704,14 @@ ngx_http_upstream_ntlm_close(ngx_connection_t *c)
     }
 #endif
 
-    if (c->pool) {
-        ngx_destroy_pool(c->pool);
-        c->pool = NULL;
-    }
+    /*
+     * Раньше здесь вызывался ngx_destroy_pool(c->pool),
+     * что приводило к use-after-free, если оставались поздние события
+     * или ссылки на c/c->pool. Доверяем стандартному ngx_close_connection().
+     */
+
     ngx_close_connection(c);
 }
-
 
 /* ---------- SSL session passthrough ---------- */
 
