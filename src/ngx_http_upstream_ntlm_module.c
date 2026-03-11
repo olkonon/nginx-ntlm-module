@@ -1,19 +1,8 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include "ngx_http_upstream_ntlm_module.h"
 
-
-/* ---------- режимы ntlm_mode ---------- */
-
-typedef enum {
-    NGX_NTLM_MODE_UNSET   = NGX_CONF_UNSET_UINT,
-    NGX_NTLM_MODE_STRICT  = 0,
-    NGX_NTLM_MODE_LENIENT = 1,
-    NGX_NTLM_MODE_AUTO    = 2
-} ngx_ntlm_mode_e;
-
-
-/* ---------- прото ---------- */
 
 static ngx_int_t
 ngx_http_upstream_init_ntlm_peer(ngx_http_request_t *r,
@@ -35,59 +24,11 @@ static void ngx_http_upstream_ntlm_save_session(ngx_peer_connection_t *pc,
 #endif
 
 static void *ngx_http_upstream_ntlm_create_conf(ngx_conf_t *cf);
-static char *ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd,
-                                    void *conf);
-
-/* location/server/main conf for ntlm_mode */
-typedef struct {
-    ngx_uint_t mode; /* ngx_ntlm_mode_e */
-} ngx_http_upstream_ntlm_loc_conf_t;
-
+static char *ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void *ngx_http_upstream_ntlm_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_upstream_ntlm_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static char *ngx_http_upstream_ntlm_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-
 static void ngx_http_upstream_client_conn_cleanup(void *data);
-
-
-/* ---------- upstream srv conf / cache ---------- */
-
-typedef struct {
-    ngx_uint_t max_cached;
-    ngx_msec_t timeout;
-    ngx_queue_t free;
-    ngx_queue_t cache;
-    ngx_http_upstream_init_pt original_init_upstream;
-    ngx_http_upstream_init_peer_pt original_init_peer;
-} ngx_http_upstream_ntlm_srv_conf_t;
-
-typedef struct {
-    ngx_http_upstream_ntlm_srv_conf_t *conf;
-    ngx_queue_t queue;
-    ngx_connection_t *peer_connection;
-    ngx_connection_t *client_connection;
-    unsigned client_closed:1;   /* A3: client aborted */
-    unsigned queued_in_cache:1; /* A3: in cache queue now */
-} ngx_http_upstream_ntlm_cache_t;
-
-typedef struct {
-    ngx_http_upstream_ntlm_srv_conf_t *conf;
-    ngx_http_upstream_t *upstream;
-    void *data;
-    ngx_connection_t *client_connection;
-    unsigned cached : 1;
-    unsigned ntlm_init : 1;
-    unsigned lenient : 1;              /* режим послабления A4 для long-poll */
-    ngx_http_request_t *request;
-    ngx_event_get_peer_pt original_get_peer;
-    ngx_event_free_peer_pt original_free_peer;
-#if (NGX_HTTP_SSL)
-    ngx_event_set_peer_session_pt original_set_session;
-    ngx_event_save_peer_session_pt original_save_session;
-#endif
-
-} ngx_http_upstream_ntlm_peer_data_t;
-
 
 /* ---------- директивы ---------- */
 
@@ -157,6 +98,7 @@ ngx_module_t ngx_http_upstream_ntlm_module = {
 
 /* ---------- helpers: auto-detect lenient for Exchange ---------- */
 
+//+++
 static ngx_table_elt_t *
 ngx_http_ntlm_find_header(ngx_http_request_t *r, const char *name)
 {
@@ -182,6 +124,7 @@ ngx_http_ntlm_find_header(ngx_http_request_t *r, const char *name)
     return NULL;
 }
 
+//+++
 static ngx_uint_t
 ngx_http_ntlm_should_lenient_auto(ngx_http_request_t *r)
 {
@@ -247,14 +190,13 @@ ngx_http_ntlm_should_lenient_auto(ngx_http_request_t *r)
 
 /* ---------- upstream init (srv conf) ---------- */
 
-static ngx_int_t
+static ngx_int_t //+++
 ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
 {
     ngx_uint_t i;
     ngx_http_upstream_ntlm_cache_t *cached;
     ngx_http_upstream_ntlm_srv_conf_t *hncf;
-
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, cf->log, 0, "ntlm init");
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] ntlm init start");
 
     hncf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_ntlm_module);
 
@@ -262,6 +204,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_conf_init_msec_value(hncf->timeout, 60000);
 
     if (hncf->original_init_upstream(cf, us) != NGX_OK) {
+
         return NGX_ERROR;
     }
 
@@ -277,6 +220,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_queue_init(&hncf->cache);
     ngx_queue_init(&hncf->free);
 
+
     for (i = 0; i < hncf->max_cached; i++) {
         ngx_queue_insert_head(&hncf->free, &cached[i].queue);
         cached[i].conf = hncf;
@@ -284,6 +228,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
         cached[i].queued_in_cache = 0;
     }
 
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ntlm init success");
     return NGX_OK;
 }
 
@@ -377,11 +322,13 @@ ngx_http_upstream_init_ntlm_peer(ngx_http_request_t *r,
 
 /* ---------- get peer (reuse from cache) ---------- */
 
+//+++
 static ngx_int_t
 ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
 {
     ngx_http_upstream_ntlm_peer_data_t *hndp = data;
     ngx_http_upstream_ntlm_cache_t *item;
+    ngx_slab_pool_t *shpool;
 
     ngx_int_t rc;
     ngx_queue_t *q, *cache;
@@ -394,6 +341,16 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
     }
 
     /* search cache for suitable connection */
+    if (hndp->conf->shm_zone == NULL) {
+         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                           "[ntlm] shm_zone is NULL");
+        return NGX_ERROR;
+    }
+
+    shpool = (ngx_slab_pool_t *)hndp->conf->shm_zone->shm.addr;
+    ngx_shmtx_lock(&shpool->mutex);
+
+
     cache = &hndp->conf->cache;
 
     for (q = ngx_queue_head(cache); q != ngx_queue_sentinel(cache);
@@ -412,7 +369,7 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
         }
     }
 
-    return NGX_OK;
+    goto returnOK;
 
 found:
 
@@ -429,7 +386,8 @@ found:
         pc->cached = 0;
         pc->connection = NULL;
         item->peer_connection = NULL;
-        return NGX_OK;
+
+        goto returnOK;
     }
 
     /* A4: строгая проверка «тишины» только если !lenient */
@@ -444,7 +402,8 @@ found:
             pc->cached = 0;
             pc->connection = NULL;
             item->peer_connection = NULL;
-            return NGX_OK;
+
+            goto returnOK;
         }
     }
 
@@ -471,7 +430,12 @@ found:
     pc->connection = c;
     pc->cached     = 1;
 
+    ngx_shmtx_unlock(&shpool->mutex);
     return NGX_DONE;
+
+returnOK:
+    ngx_shmtx_unlock(&shpool->mutex);
+    return NGX_OK;
 }
 
 
@@ -488,6 +452,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     ngx_http_upstream_t *u;
     ngx_pool_cleanup_t *cln;
     ngx_http_upstream_ntlm_cache_t *cleanup_item = NULL;
+    ngx_slab_pool_t *shpool;
 
     /* cache valid connections */
     u = hndp->upstream;
@@ -533,6 +498,14 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
         if (n == -1 && ngx_socket_errno != NGX_EAGAIN) { goto invalid; }
     }
 
+    if (hndp->conf->shm_zone==NULL) {
+         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                           "[ntlm] shm_zone is NULL");
+        goto invalid;
+    }
+    shpool = (ngx_slab_pool_t *) hndp->conf->shm_zone->shm.addr;
+
+    ngx_shmtx_lock(&shpool->mutex);
     if (ngx_queue_empty(&hndp->conf->free)) {
         q = ngx_queue_last(&hndp->conf->cache);
         ngx_queue_remove(q);
@@ -556,6 +529,8 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     item->peer_connection   = c;
     item->client_connection = hndp->client_connection;
     item->client_closed     = 0; /* A3 */
+
+    ngx_shmtx_unlock(&shpool->mutex);
 
     ngx_log_debug2(
         NGX_LOG_DEBUG_HTTP, pc->log, 0,
@@ -615,40 +590,52 @@ static void
 ngx_http_upstream_client_conn_cleanup(void *data)
 {
     ngx_http_upstream_ntlm_cache_t *item = data;
+    ngx_connection_t               *pc;
+
+    pc = item->peer_connection;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                    "ntlm client closed %p, posting close for upstream %p",
-                   item->client_connection, item->peer_connection);
+                   item->client_connection, pc);
 
-    if (item->peer_connection != NULL) {
-        item->client_closed = 1;                     /* A1/A3 mark */
-        item->peer_connection->read->timedout = 1;   /* force close-handler path */
-        ngx_post_event(item->peer_connection->read, &ngx_posted_events);
+    if (pc != NULL
+        && pc->fd != (ngx_socket_t) -1
+        && !pc->close)
+    {
+        item->client_closed = 1; /* A1/A3 mark */
+        pc->read->timedout = 1;  /* force close-handler path */
+        ngx_post_event(pc->read, &ngx_posted_events);
+    } else {
+        /* соединение уже мертво/закрыто – отвязываем,
+         * чтобы не было висячей ссылки в кеше
+         */
+        item->peer_connection = NULL;
     }
 }
 
 
 /* ---------- handlers ---------- */
-
+//+++
 static void
 ngx_http_upstream_ntlm_dummy_handler(ngx_event_t *ev)
 {
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, ev->log, 0, "ntlm dummy handler");
 }
 
+//+++
 static void
 ngx_http_upstream_ntlm_close_handler(ngx_event_t *ev)
 {
-    ngx_http_upstream_ntlm_srv_conf_t  *conf;
-    ngx_http_upstream_ntlm_cache_t     *item;
-    ngx_connection_t                   *c;
-    int                                  n;
-    char                                 buf[1];
+    ngx_http_upstream_ntlm_srv_conf_t *conf;
+    ngx_http_upstream_ntlm_cache_t    *item;
+    ngx_connection_t                  *c;
+    int                                n;
+    char                               buf[1];
 
     c = ev->data;
 
     /* идемпотентный гард */
-    if (c->fd == (ngx_socket_t) -1 || c->close) {
+    if (c == NULL || c->fd == (ngx_socket_t) -1 || c->close) {
         return;
     }
 
@@ -674,6 +661,12 @@ close:
                    c, c->read->timedout);
 
     item = c->data;
+    if (item == NULL) {
+        /* соединение уже не привязано к кешу */
+        ngx_http_upstream_ntlm_close(c);
+        return;
+    }
+
     conf = item->conf;
 
     /* не позволяем cleanup постить повторно */
@@ -686,11 +679,16 @@ close:
         ngx_queue_insert_head(&conf->free, &item->queue);
     }
 
+    /* разрываем связь c->data -> item, чтобы поздние события
+     * не лезли в уже перераспределённый item.
+     */
+    c->data = NULL;
+
     ngx_http_upstream_ntlm_close(c);
 
     item->client_closed = 0;
 }
-
+//+++
 static void
 ngx_http_upstream_ntlm_close(ngx_connection_t *c)
 {
@@ -706,18 +704,19 @@ ngx_http_upstream_ntlm_close(ngx_connection_t *c)
     }
 #endif
 
-    if (c->pool) {
-        ngx_destroy_pool(c->pool);
-        c->pool = NULL;
-    }
+    /*
+     * Раньше здесь вызывался ngx_destroy_pool(c->pool),
+     * что приводило к use-after-free, если оставались поздние события
+     * или ссылки на c/c->pool. Доверяем стандартному ngx_close_connection().
+     */
+
     ngx_close_connection(c);
 }
-
 
 /* ---------- SSL session passthrough ---------- */
 
 #if (NGX_HTTP_SSL)
-
+//+++
 static ngx_int_t
 ngx_http_upstream_ntlm_set_session(ngx_peer_connection_t *pc, void *data)
 {
@@ -725,6 +724,7 @@ ngx_http_upstream_ntlm_set_session(ngx_peer_connection_t *pc, void *data)
     return hndp->original_set_session(pc, hndp->data);
 }
 
+//+++
 static void
 ngx_http_upstream_ntlm_save_session(ngx_peer_connection_t *pc, void *data)
 {
@@ -754,16 +754,34 @@ ngx_http_upstream_ntlm_create_conf(ngx_conf_t *cf)
 }
 
 
-/* ---------- upstream directive "ntlm" ---------- */
+/* ---------- inti zone callback ---------- */
+static ngx_int_t
+ngx_http_my_module_init_zone(ngx_shm_zone_t *shm_zone, void *data)
+{
+    ngx_slab_pool_t  *shpool;
+
+    // Адрес сегмента памяти
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    if (data) {
+        // Если data не NULL, значит это reload, и зона уже была создана ранее
+        shm_zone->data = data;
+        return NGX_OK;
+    }
+
+    shm_zone->data = shpool;
+    return NGX_OK;
+}
 
 static char *
 ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_http_upstream_srv_conf_t *uscf;
-    ngx_http_upstream_ntlm_srv_conf_t *hncf = conf;
-
-    ngx_int_t n;
-    ngx_str_t *value;
+    ngx_http_upstream_srv_conf_t        *uscf;
+    ngx_http_upstream_ntlm_srv_conf_t   *hncf = conf;
+    ngx_int_t                           n;
+    ngx_str_t                           *value;
+    ngx_str_t                           name = ngx_string("ntlm_cache_mutex_zone");
+    ngx_shm_zone_t                      *shm_zone;
 
     /* read options */
     if (cf->args->nelts == 2) {
@@ -785,6 +803,21 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                                        : ngx_http_upstream_init_round_robin;
 
     uscf->peer.init_upstream = ngx_http_upstream_init_ntlm;
+
+    /*----- SHM mutex create -----*/
+
+    shm_zone = ngx_shared_memory_add(cf, &name, ngx_pagesize, &ngx_http_upstream_ntlm_module);
+    if (shm_zone == NULL) {
+        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] SHM init error");
+        return NGX_CONF_ERROR;
+    }
+
+    shm_zone->init = ngx_http_my_module_init_zone;
+
+
+    hncf->shm_zone = shm_zone;
+    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] cache_mutex create success");
+    /*----- End SHM mutex create -----*/
 
     return NGX_CONF_OK;
 }

@@ -1,5 +1,6 @@
 .idea
 .clangd
+go.mod
 compile_commands.json
 t/servroot
 t/*/node_modules
