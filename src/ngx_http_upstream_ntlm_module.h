@@ -32,9 +32,21 @@ typedef struct {
     ngx_queue_t queue;
     ngx_connection_t *peer_connection;
     ngx_connection_t *client_connection;
+    ngx_atomic_uint_t client_number;    /* identity snapshot — defeats slot reuse */
     unsigned client_closed:1;   /* A3: client aborted */
     unsigned queued_in_cache:1; /* A3: in cache queue now */
 } ngx_http_upstream_ntlm_cache_t;
+
+/* Per-item cleanup data registered on the client connection's pool.
+ * Holds an immutable snapshot of the identity at registration time so the
+ * cleanup handler can detect a stale/recycled item and refuse to act.
+ */
+typedef struct {
+    ngx_http_upstream_ntlm_cache_t *item;
+    ngx_connection_t               *expected_client;
+    ngx_atomic_uint_t               expected_client_num;
+    ngx_connection_t               *expected_peer;
+} ngx_http_upstream_ntlm_cleanup_data_t;
 
 typedef struct {
     ngx_http_upstream_ntlm_srv_conf_t *conf;
