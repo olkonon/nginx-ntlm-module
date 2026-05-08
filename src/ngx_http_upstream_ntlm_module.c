@@ -357,7 +357,14 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
          q = ngx_queue_next(q)) {
         item = ngx_queue_data(q, ngx_http_upstream_ntlm_cache_t, queue);
 
-        if (item->client_connection == hndp->client_connection) {
+        /* Identity check: pointer alone is not enough — nginx recycles
+         * ngx_connection_t slots, so a freed client's pointer can be
+         * reassigned to a brand-new client. Compare the per-accept
+         * connection counter (c->number) to detect that case.
+         */
+        if (item->client_connection == hndp->client_connection
+            && item->client_number     == hndp->client_connection->number)
+        {
             c = item->peer_connection;
 
             ngx_queue_remove(q);
@@ -451,7 +458,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     ngx_connection_t *c;
     ngx_http_upstream_t *u;
     ngx_pool_cleanup_t *cln;
-    ngx_http_upstream_ntlm_cache_t *cleanup_item = NULL;
+    ngx_http_upstream_ntlm_cleanup_data_t *cdata;
     ngx_slab_pool_t *shpool;
 
     /* cache valid connections */
@@ -512,6 +519,13 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
 
         item = ngx_queue_data(q, ngx_http_upstream_ntlm_cache_t, queue);
 
+        /* Invalidate the previous owner's identity BEFORE we hand this
+         * slot to a new client. Any pool cleanup still queued on the
+         * previous client's pool will see a mismatched identity and no-op.
+         */
+        item->client_connection = NULL;
+        item->client_number     = 0;
+
         ngx_http_upstream_ntlm_close(item->peer_connection);
         item->peer_connection = NULL;
         item->client_closed   = 0;
@@ -528,6 +542,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
 
     item->peer_connection   = c;
     item->client_connection = hndp->client_connection;
+    item->client_number     = hndp->client_connection->number;
     item->client_closed     = 0; /* A3 */
 
     ngx_shmtx_unlock(&shpool->mutex);
@@ -537,22 +552,25 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
         "ntlm free peer saving item client_connection %p, peer connection %p",
         item->client_connection, c);
 
-    /* client connection cleanup: create once */
-    for (cln = item->client_connection->pool->cleanup; cln; cln = cln->next) {
-        if (cln->handler == ngx_http_upstream_client_conn_cleanup) {
-            cleanup_item = cln->data;
-            break;
-        }
-    }
-    if (cleanup_item == NULL) {
-        cln = ngx_pool_cleanup_add(item->client_connection->pool, 0);
-        if (cln == NULL) {
-            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                           "ntlm free peer ngx_pool_cleanup_add returned null");
-        } else {
-            cln->handler = ngx_http_upstream_client_conn_cleanup;
-            cln->data = item;
-        }
+    /* Always register a fresh per-item cleanup carrying an identity
+     * snapshot. The handler will compare this snapshot against the
+     * current state of `item` and refuse to act if it has been
+     * recycled for another client (the previous logic deduped on
+     * "any cleanup with our handler", which left subsequent cache
+     * entries on the same client_connection without protection).
+     */
+    cln = ngx_pool_cleanup_add(item->client_connection->pool,
+                                sizeof(ngx_http_upstream_ntlm_cleanup_data_t));
+    if (cln == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                       "ntlm free peer ngx_pool_cleanup_add returned null");
+    } else {
+        cdata = cln->data;
+        cdata->item                = item;
+        cdata->expected_client     = item->client_connection;
+        cdata->expected_client_num = item->client_number;
+        cdata->expected_peer       = c;
+        cln->handler               = ngx_http_upstream_client_conn_cleanup;
     }
 
     pc->connection = NULL;
@@ -589,14 +607,40 @@ invalid:
 static void
 ngx_http_upstream_client_conn_cleanup(void *data)
 {
-    ngx_http_upstream_ntlm_cache_t *item = data;
-    ngx_connection_t               *pc;
+    ngx_http_upstream_ntlm_cleanup_data_t *cdata = data;
+    ngx_http_upstream_ntlm_cache_t        *item;
+    ngx_connection_t                      *pc;
+
+    item = cdata->item;
+
+    /* Stale-cleanup guard: if the slot has been recycled (different
+     * client_connection / counter, or different peer), this cleanup
+     * predates the current contents and must NOT touch them — otherwise
+     * we'd close another tenant's authenticated upstream, or worse,
+     * leave a real entry uncleaned and let pointer reuse expose it.
+     */
+    if (item == NULL
+        || item->client_connection != cdata->expected_client
+        || item->client_number     != cdata->expected_client_num
+        || item->peer_connection   != cdata->expected_peer)
+    {
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
+                       "ntlm stale client cleanup skipped (item %p)", item);
+        return;
+    }
 
     pc = item->peer_connection;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
                    "ntlm client closed %p, posting close for upstream %p",
                    item->client_connection, pc);
+
+    /* Invalidate identity immediately so any other pending cleanup
+     * registered for the same item (e.g. multiple cache rounds on the
+     * same client connection) becomes a no-op.
+     */
+    item->client_connection = NULL;
+    item->client_number     = 0;
 
     if (pc != NULL
         && pc->fd != (ngx_socket_t) -1
@@ -678,6 +722,15 @@ close:
         item->queued_in_cache = 0;
         ngx_queue_insert_head(&conf->free, &item->queue);
     }
+
+    /* Identity invalidation: zero out the cache key so
+     *   1) a pending pool cleanup on the original client's pool sees a
+     *      mismatched snapshot and refuses to act, and
+     *   2) a future client whose ngx_connection_t* slot happens to be
+     *      reused cannot match this freed entry by pointer alone.
+     */
+    item->client_connection = NULL;
+    item->client_number     = 0;
 
     /* разрываем связь c->data -> item, чтобы поздние события
      * не лезли в уже перераспределённый item.
