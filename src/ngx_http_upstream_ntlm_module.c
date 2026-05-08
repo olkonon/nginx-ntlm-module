@@ -66,13 +66,10 @@ static ngx_command_t ngx_http_upstream_ntlm_commands[] = {
 static ngx_http_module_t ngx_http_upstream_ntlm_ctx = {
     NULL, /* preconfiguration */
     NULL, /* postconfiguration */
-
     NULL, /* create main configuration */
     NULL, /* init main configuration */
-
     ngx_http_upstream_ntlm_create_conf, /* create server (upstream srv) configuration */
     NULL,                                /* merge server configuration */
-
     ngx_http_upstream_ntlm_create_loc_conf,  /* create location config for ntlm_mode */
     ngx_http_upstream_ntlm_merge_loc_conf    /* merge location config */
 };
@@ -196,7 +193,8 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_uint_t i;
     ngx_http_upstream_ntlm_cache_t *cached;
     ngx_http_upstream_ntlm_srv_conf_t *hncf;
-    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] ntlm init start");
+
+    dbg_conf_log_info(cf, "[ntlm] Start init");
 
     hncf = ngx_http_conf_upstream_srv_conf(us, ngx_http_upstream_ntlm_module);
 
@@ -204,7 +202,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     ngx_conf_init_msec_value(hncf->timeout, 60000);
 
     if (hncf->original_init_upstream(cf, us) != NGX_OK) {
-
+        conf_log_error(cf, "[ntlm] Original upstream init error");
         return NGX_ERROR;
     }
 
@@ -214,6 +212,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
     cached = ngx_pcalloc(cf->pool, sizeof(ngx_http_upstream_ntlm_cache_t) *
                                        hncf->max_cached);
     if (cached == NULL) {
+        conf_log_error(cf, "[ntlm] Can't allocate cache");
         return NGX_ERROR;
     }
 
@@ -228,7 +227,7 @@ ngx_http_upstream_init_ntlm(ngx_conf_t *cf, ngx_http_upstream_srv_conf_t *us)
         cached[i].queued_in_cache = 0;
     }
 
-    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ntlm init success");
+    dbg_conf_log_info(cf, "[ntlm] Init success");
     return NGX_OK;
 }
 
@@ -271,8 +270,7 @@ ngx_http_upstream_init_ntlm_peer(ngx_http_request_t *r,
              ngx_strncasecmp(auth_header_value.data, (u_char *)"Negotiate",
                              sizeof("Negotiate") - 1) == 0))
         {
-            ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "ntlm auth header found");
+            dbg_log_info(r->connection->log, "[ntlm] Auth header found");
             hnpd->ntlm_init = 1;
         }
     }
@@ -342,8 +340,7 @@ ngx_http_upstream_get_ntlm_peer(ngx_peer_connection_t *pc, void *data)
 
     /* search cache for suitable connection */
     if (hndp->conf->shm_zone == NULL) {
-         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                           "[ntlm] shm_zone is NULL");
+        log_error(pc->log, "[ntlm] shm_zone is NULL");
         return NGX_ERROR;
     }
 
@@ -386,8 +383,7 @@ found:
         || c->read->eof || c->read->error || c->read->timedout
         || c->write->error || c->write->timedout)
     {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                       "ntlm peer cached connection %p is dead, closing", c);
+        dbg_log_info(pc->log,"[ntlm] peer cached connection %p is dead, closing", c);
 
         ngx_http_upstream_ntlm_close(c);
         pc->cached = 0;
@@ -403,8 +399,7 @@ found:
         char b;
         n = recv(c->fd, &b, 1, MSG_PEEK);
         if (n == 0 || (n == -1 && ngx_socket_errno != NGX_EAGAIN)) {
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                           "ntlm peer cached connection %p failed peek (n=%d), closing", c, n);
+            dbg_log_info(pc->log,"[ntlm] peer cached connection %p failed peek (n=%d), closing", c, n);
             ngx_http_upstream_ntlm_close(c);
             pc->cached = 0;
             pc->connection = NULL;
@@ -414,8 +409,7 @@ found:
         }
     }
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "ntlm peer using cached connection %p", c);
+    dbg_log_info(pc->log,"[ntlm] peer using cached connection %p", c);
 
     /* prepare socket for reuse */
     c->idle = 0;
@@ -506,8 +500,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     }
 
     if (hndp->conf->shm_zone==NULL) {
-         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                           "[ntlm] shm_zone is NULL");
+        dbg_log_info(pc->log, "[ntlm] shm_zone is NULL");
         goto invalid;
     }
     shpool = (ngx_slab_pool_t *) hndp->conf->shm_zone->shm.addr;
@@ -547,10 +540,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
 
     ngx_shmtx_unlock(&shpool->mutex);
 
-    ngx_log_debug2(
-        NGX_LOG_DEBUG_HTTP, pc->log, 0,
-        "ntlm free peer saving item client_connection %p, peer connection %p",
-        item->client_connection, c);
+    dbg_log_info(pc->log,"[ntlm] free peer saving item client_connection %p, peer connection %p",item->client_connection, c);
 
     /* Always register a fresh per-item cleanup carrying an identity
      * snapshot. The handler will compare this snapshot against the
@@ -562,8 +552,7 @@ ngx_http_upstream_free_ntlm_peer(ngx_peer_connection_t *pc, void *data, ngx_uint
     cln = ngx_pool_cleanup_add(item->client_connection->pool,
                                 sizeof(ngx_http_upstream_ntlm_cleanup_data_t));
     if (cln == NULL) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                       "ntlm free peer ngx_pool_cleanup_add returned null");
+        dbg_log_info(pc->log,"[ntlm] free peer ngx_pool_cleanup_add returned null");
     } else {
         cdata = cln->data;
         cdata->item                = item;
@@ -624,16 +613,13 @@ ngx_http_upstream_client_conn_cleanup(void *data)
         || item->client_number     != cdata->expected_client_num
         || item->peer_connection   != cdata->expected_peer)
     {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                       "ntlm stale client cleanup skipped (item %p)", item);
+        dbg_log_info(ngx_cycle->log, "[ntlm] stale client cleanup skipped (item %p)", item);
         return;
     }
 
     pc = item->peer_connection;
 
-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ngx_cycle->log, 0,
-                   "ntlm client closed %p, posting close for upstream %p",
-                   item->client_connection, pc);
+    dbg_log_info(ngx_cycle->log,"[ntlm] client closed %p, posting close for upstream %p", item->client_connection, pc);
 
     /* Invalidate identity immediately so any other pending cleanup
      * registered for the same item (e.g. multiple cache rounds on the
@@ -663,7 +649,7 @@ ngx_http_upstream_client_conn_cleanup(void *data)
 static void
 ngx_http_upstream_ntlm_dummy_handler(ngx_event_t *ev)
 {
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, ev->log, 0, "ntlm dummy handler");
+    dbg_log_info(ev->log,"[ntlm] dummy handler");
 }
 
 //+++
@@ -700,9 +686,7 @@ ngx_http_upstream_ntlm_close_handler(ngx_event_t *ev)
 
 close:
 
-    ngx_log_debug2(NGX_LOG_DEBUG_HTTP, ev->log, 0,
-                   "ntlm close peer connection %p, timeout %ui",
-                   c, c->read->timedout);
+    dbg_log_info(ev->log,"[ntlm] close peer connection %p, timeout %ui",c, c->read->timedout);
 
     item = c->data;
     if (item == NULL) {
@@ -842,7 +826,7 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         n = ngx_atoi(value[1].data, value[1].len);
         if (n == NGX_ERROR || n == 0) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "ntlm invalid value \"%V\" in \"%V\" directive",
+                               "[ntlm] ntlm invalid value \"%V\" in \"%V\" directive",
                                &value[1], &cmd->name);
             return NGX_CONF_ERROR;
         }
@@ -861,7 +845,7 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     shm_zone = ngx_shared_memory_add(cf, &name, ngx_pagesize, &ngx_http_upstream_ntlm_module);
     if (shm_zone == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] SHM init error");
+        conf_log_error(cf,"[ntlm] SHM init error");
         return NGX_CONF_ERROR;
     }
 
@@ -869,7 +853,7 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
 
     hncf->shm_zone = shm_zone;
-    ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "[ntlm] cache_mutex create success");
+    dbg_conf_log_info(cf,"[ntlm] cache_mutex create success");
     /*----- End SHM mutex create -----*/
 
     return NGX_CONF_OK;
@@ -923,7 +907,7 @@ ngx_http_upstream_ntlm_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                       "invalid value \"%V\" in \"ntlm_mode\"; "
+                       "[ntlm] invalid value \"%V\" in \"ntlm_mode\"; "
                        "expected strict|lenient|auto", &m);
     return NGX_CONF_ERROR;
 }

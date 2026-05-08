@@ -1,4 +1,26 @@
 
+
+//logging primitives
+#define log_error(log,...)                        ngx_log_error (NGX_LOG_ERR, log, 0, __VA_ARGS__)
+#define conf_log_error(cf,...)                    ngx_conf_log_error (NGX_LOG_ERR, cf, 0, __VA_ARGS__)
+
+#define log_info(log,...)                        ngx_log_error (NGX_LOG_INFO, log, 0, __VA_ARGS__)
+#define conf_log_info(cf,...)                    ngx_conf_log_error (NGX_LOG_INFO, cf, 0, __VA_ARGS__)
+
+#ifdef NGX_DEBUG
+    #define dbg_conf_log_info(cf,...)                 ngx_conf_log_error (NGX_LOG_INFO, cf, 0, __VA_ARGS__)
+    #define dbg_log_info(log,...)                     ngx_log_error (NGX_LOG_INFO, log, 0, __VA_ARGS__)
+
+    #define dbg_conf_log_error(cf,...)                ngx_conf_log_error (NGX_LOG_ERR, cf, 0, __VA_ARGS__)
+    #define dbg_log_error(log,...)                    ngx_log_error (NGX_LOG_ERR, log, 0, __VA_ARGS__)
+#else
+    #define dbg_conf_log_info(cf,...)
+    #define dbg_log_info(log,...)
+
+    #define dbg_conf_log_error(cf,...)
+    #define dbg_log_error(log,...)
+#endif
+
 /* location/server/main conf for ntlm_mode */
 typedef struct {
     ngx_uint_t mode; /* ngx_ntlm_mode_e */
