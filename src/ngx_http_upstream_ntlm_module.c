@@ -4,6 +4,22 @@
 #include "ngx_http_upstream_ntlm_module.h"
 
 
+/* Layout shim for ngx_http_upstream_keepalive_module's srv conf.
+ * `max_cached` is the first field of the keepalive module's srv conf
+ * struct in every nginx release we support (1.27.5..1.30.1). Setting it
+ * to 0 in our directive handler suppresses the default-on auto-wrap
+ * introduced in 1.29.7 ("Change: the keepalive directive in the upstream
+ * block is enabled by default") so the standard keepalive module's
+ * address-keyed cache cannot hand a different tenant the connection we
+ * pin for NTLM/Negotiate authentication.
+ */
+typedef struct {
+    ngx_uint_t  max_cached;
+} ngx_http_upstream_keepalive_max_cached_shim_t;
+
+extern ngx_module_t  ngx_http_upstream_keepalive_module;
+
+
 static ngx_int_t
 ngx_http_upstream_init_ntlm_peer(ngx_http_request_t *r,
                                  ngx_http_upstream_srv_conf_t *us);
@@ -840,6 +856,16 @@ ngx_http_upstream_ntlm(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                                        : ngx_http_upstream_init_round_robin;
 
     uscf->peer.init_upstream = ngx_http_upstream_init_ntlm;
+
+    {
+        ngx_http_upstream_keepalive_max_cached_shim_t  *kcf;
+
+        kcf = ngx_http_conf_upstream_srv_conf(uscf,
+                                  ngx_http_upstream_keepalive_module);
+        if (kcf != NULL && kcf->max_cached == NGX_CONF_UNSET_UINT) {
+            kcf->max_cached = 0;
+        }
+    }
 
     /*----- SHM mutex create -----*/
 
